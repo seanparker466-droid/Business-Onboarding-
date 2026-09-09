@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Renovation Business Discovery",
+  title: "Business Discovery",
   description: "Operations discovery and workflow assessment",
 };
 

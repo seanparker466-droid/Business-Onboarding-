@@ -36,8 +36,18 @@ import {
   getPriorityLabel,
   getReadiness,
   getQuestionText,
+  getModuleKeywordMap,
   type Answers,
 } from "../../lib/assessment-analysis";
+import { INDUSTRIES, DEFAULT_INDUSTRY, industryLabel } from "../../lib/industries";
+import {
+  getBlueprintTemplate,
+  getSpecTitle,
+  getRecommendations,
+  getAutomationFor,
+  getOpportunityImpact,
+  getFirstBuild,
+} from "../../lib/blueprint-content";
 
 interface Assessment {
   id: string;
@@ -45,6 +55,7 @@ interface Assessment {
   contact_name: string | null;
   company_name: string | null;
   email: string | null;
+  industry?: string | null;
   answers: Answers;
   status?: "submitted" | "reviewed";
   reviewed_at?: string | null;
@@ -125,16 +136,21 @@ export default function AdminPage() {
 
     const { data, error: fetchError } = await supabase
       .from("assessments")
-      .select("id,created_at,contact_name,company_name,email,answers")
+      .select("id,created_at,contact_name,company_name,email,industry,answers")
       .order("created_at", { ascending: false });
 
     if (fetchError) {
       setError(fetchError.message);
       setAssessments([]);
     } else {
-      // Keep the Admin usable against the original assessments table as well.
-      // Status/reviewed_at are optional until the first-client migration is run.
-      setAssessments(((data as Assessment[]) || []).map((item) => ({ ...item, status: item.status || "submitted" })));
+      // Keep the Admin usable against older assessments tables too. Status/reviewed_at
+      // are optional until the first-client migration is run; industry is optional
+      // until the multi-industry migration is run.
+      setAssessments(((data as Assessment[]) || []).map((item) => ({
+        ...item,
+        status: item.status || "submitted",
+        industry: item.industry || DEFAULT_INDUSTRY,
+      })));
     }
     setLoading(false);
   }
@@ -263,7 +279,7 @@ export default function AdminPage() {
           <div className="ops-brand">
             <span className="ops-brand-mark"><BarChart3 size={18} /></span>
             <div>
-              <strong>RENOVATION</strong>
+              <strong>BUSINESS</strong>
               <span>DISCOVERY</span>
             </div>
           </div>
@@ -290,7 +306,7 @@ export default function AdminPage() {
                 {item.icon}
                 <span>{item.label}</span>
                 {item.id === "opportunities" && assessments.length > 0 && (
-                  <b>{aggregateOpportunities(assessments).filter((m) => m.priority === "High opportunity").length}</b>
+                  <b>{aggregateOpportunities(assessments, assessments[0]?.industry || DEFAULT_INDUSTRY).filter((m) => m.priority === "High opportunity").length}</b>
                 )}
               </button>
             ))}
@@ -426,7 +442,7 @@ function LoginScreen(props: {
       <div className="ops-login-card">
         <div className="ops-login-logo"><BarChart3 size={23} /></div>
         <span className="ops-kicker">PRIVATE ADMIN AREA</span>
-        <h1>Renovation Discovery</h1>
+        <h1>Business Discovery</h1>
         <p>Turn business answers into an operational system roadmap.</p>
 
         <form onSubmit={props.signIn}>
@@ -467,10 +483,11 @@ function Overview({
   onOpenView: (view: View) => void;
 }) {
   const average = assessments.length
-    ? Math.round(assessments.reduce((sum, item) => sum + getReadiness(item.answers || {}), 0) / assessments.length)
+    ? Math.round(assessments.reduce((sum, item) => sum + getReadiness(item.answers || {}, item.industry || DEFAULT_INDUSTRY), 0) / assessments.length)
     : 0;
 
-  const opportunities = aggregateOpportunities(assessments);
+  const [industryFilter, setIndustryFilter] = useState(() => assessments[0]?.industry || DEFAULT_INDUSTRY);
+  const opportunities = aggregateOpportunities(assessments, industryFilter);
   const top = opportunities[0];
   const highCount = opportunities.filter((o) => o.priority === "High opportunity").length;
 
@@ -497,7 +514,12 @@ function Overview({
               <span className="ops-kicker">PRIORITY MAP</span>
               <h2>Where the system can make the biggest difference</h2>
             </div>
-            <button className="ops-text-btn" onClick={() => onOpenView("opportunities")}>Explore all <ChevronRight size={15} /></button>
+            <div className="ops-panel-head-actions">
+              <select className="ops-inline-select" value={industryFilter} onChange={(e) => setIndustryFilter(e.target.value)}>
+                {INDUSTRIES.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}
+              </select>
+              <button className="ops-text-btn" onClick={() => onOpenView("opportunities")}>Explore all <ChevronRight size={15} /></button>
+            </div>
           </div>
 
           {opportunities.slice(0, 5).map((item, index) => (
@@ -536,7 +558,7 @@ function Overview({
                 <small>{item.contact_name || "No contact name"} · {formatDate(item.created_at)}</small>
               </span>
               <span className="ops-readiness">
-                <strong>{getReadiness(item.answers || {})}</strong>
+                <strong>{getReadiness(item.answers || {}, item.industry || DEFAULT_INDUSTRY)}</strong>
                 <small>/100</small>
               </span>
               <ChevronRight size={16} />
@@ -571,7 +593,9 @@ function Businesses({
   setSearch: (v: string) => void;
   onOpenBusiness: (id: string) => void;
 }) {
+  const [industryFilter, setIndustryFilter] = useState("all");
   const filtered = assessments.filter((item) => {
+    if (industryFilter !== "all" && (item.industry || DEFAULT_INDUSTRY) !== industryFilter) return false;
     const needle = search.toLowerCase().trim();
     if (!needle) return true;
     return [item.company_name, item.contact_name, item.email]
@@ -589,21 +613,27 @@ function Businesses({
 
       <div className="ops-toolbar">
         <div className="ops-search"><Search size={17} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search company, contact or email" /><span>{filtered.length}</span></div>
+        <select className="ops-inline-select" value={industryFilter} onChange={(e) => setIndustryFilter(e.target.value)}>
+          <option value="all">All industries</option>
+          {INDUSTRIES.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}
+        </select>
       </div>
 
       <section className="ops-panel ops-directory">
         <div className="ops-directory-head">
-          <span>Business</span><span>Contact</span><span>Readiness</span><span>Top opportunity</span><span>Submitted</span><span />
+          <span>Business</span><span>Industry</span><span>Contact</span><span>Readiness</span><span>Top opportunity</span><span>Submitted</span><span />
         </div>
 
         {filtered.map((item) => {
-          const modules = getModules(item.answers || {});
+          const industry = item.industry || DEFAULT_INDUSTRY;
+          const modules = getModules(item.answers || {}, industry);
           const top = modules[0];
           return (
             <button className="ops-directory-row" key={item.id} onClick={() => onOpenBusiness(item.id)}>
               <span className="ops-business-cell"><span className="ops-avatar"><Building2 size={17} /></span><span><strong>{item.company_name || "Unnamed business"}</strong><small>{item.email || "No email"}</small></span></span>
+              <span><span className="ops-industry-badge">{industryLabel(industry)}</span></span>
               <span>{item.contact_name || "—"}</span>
-              <span><b className="ops-score-pill">{getReadiness(item.answers || {})}</b><small>/100</small></span>
+              <span><b className="ops-score-pill">{getReadiness(item.answers || {}, industry)}</b><small>/100</small></span>
               <span><strong>{top?.name || "—"}</strong><small>{top ? getPriorityLabel(top.score, top.percent) : ""}</small></span>
               <span>{formatDate(item.created_at)}</span>
               <ChevronRight size={16} />
@@ -625,25 +655,14 @@ type OpportunitySignal = {
   answer: string;
 };
 
-function getOpportunitySignals(assessments: Assessment[], opportunityName: string): OpportunitySignal[] {
-  const keywordMap: Record<string, string[]> = {
-    "Materials & Purchasing": ["material", "materials", "supplier", "purchase", "purchasing", "receipt", "delivery", "store run", "pick up"],
-    "Scheduling & Dispatch": ["schedule", "scheduling", "crew", "calendar", "appointment", "last-minute", "schedule conflict", "weather"],
-    "Lead & Sales CRM": ["lead", "estimate", "proposal", "sales", "follow-up", "customer status", "inquiry"],
-    "Project Management": ["project", "milestone", "scope", "contract", "change order", "progress", "closeout"],
-    "Job Costing": ["cost", "invoic", "labor", "subcontract", "receipt", "price", "pricing"],
-    "Field Operations": ["job site", "job-site", "crew", "field", "photo", "photos", "measurement", "measurements", "hours"],
-    "Customer Experience": ["customer", "call", "email", "update", "approval", "status"],
-    "Document Hub": ["document", "documents", "file", "files", "contract", "permit", "photo", "photos", "receipt", "records"],
-    "Automation & AI": ["manual", "data entry", "repeating", "repeat", "reminder", "follow-up", "administrative", "too often"],
-  };
-
+function getOpportunitySignals(assessments: Assessment[], opportunityName: string, industry: string = DEFAULT_INDUSTRY): OpportunitySignal[] {
+  const keywordMap = getModuleKeywordMap(industry);
   const keywords = keywordMap[opportunityName] || [];
   const signals: OpportunitySignal[] = [];
 
   assessments.forEach((assessment) => {
     Object.entries(assessment.answers || {}).forEach(([id, value]) => {
-      const meta = getQuestionText(id);
+      const meta = getQuestionText(id, assessment.industry || industry);
       const answer = formatAnswer(id, value, assessment.answers || {});
       if (!answer.trim()) return;
 
@@ -663,32 +682,6 @@ function getOpportunitySignals(assessments: Assessment[], opportunityName: strin
   return signals.slice(0, 24);
 }
 
-function opportunityImpact(name: string) {
-  const n = name.toLowerCase();
-  if (n.includes("material")) return "Material readiness directly affects whether a crew can start, stay productive and finish without unplanned trips.";
-  if (n.includes("schedule")) return "Scheduling friction creates downstream conflicts between crews, customers, materials, weather and job timing.";
-  if (n.includes("lead")) return "Lead and follow-up gaps create revenue leakage before a project is even scheduled.";
-  if (n.includes("project")) return "Disconnected project information makes it harder to control scope, changes, milestones and accountability.";
-  if (n.includes("cost")) return "Weak job-cost visibility makes it difficult to know which jobs are actually profitable until after the work is complete.";
-  if (n.includes("field")) return "Field information that arrives late or incomplete forces office staff to chase updates and recreate job records.";
-  if (n.includes("customer")) return "Customers should not have to call for information that the system can proactively communicate.";
-  if (n.includes("document")) return "Scattered records increase search time and make closeout, billing, warranty and compliance harder.";
-  return "Repeated manual work is a strong candidate for standardization, automation and AI assistance.";
-}
-
-function firstBuildFor(name: string) {
-  const n = name.toLowerCase();
-  if (n.includes("material")) return "Build a job-linked material request and purchasing board first.";
-  if (n.includes("schedule")) return "Build a shared schedule with crew assignment, dependencies and material-readiness status.";
-  if (n.includes("lead")) return "Build a lead pipeline with automatic follow-up tasks and estimate status.";
-  if (n.includes("project")) return "Build a project record that becomes the single source of truth after approval.";
-  if (n.includes("cost")) return "Build job-cost tracking that connects estimates, labor, materials, receipts and invoices.";
-  if (n.includes("field")) return "Build a mobile field update flow for instructions, photos, hours, measurements and issues.";
-  if (n.includes("customer")) return "Build proactive customer updates tied to project milestones and schedule changes.";
-  if (n.includes("document")) return "Build a project document hub with automatic filing by document type.";
-  return "Map the repetitive administrative workflow and automate its highest-volume handoff first.";
-}
-
 function Opportunities({
   assessments,
   selectedOpportunity,
@@ -698,7 +691,8 @@ function Opportunities({
   selectedOpportunity: string | null;
   setSelectedOpportunity: (name: string | null) => void;
 }) {
-  const opportunities = aggregateOpportunities(assessments);
+  const [industryFilter, setIndustryFilter] = useState(() => assessments[0]?.industry || DEFAULT_INDUSTRY);
+  const opportunities = aggregateOpportunities(assessments, industryFilter);
   const selected = opportunities.find((item) => item.name === selectedOpportunity) || opportunities[0] || null;
 
   return (
@@ -707,6 +701,11 @@ function Opportunities({
         kicker="OPERATIONAL OPPORTUNITIES"
         title="Where the business is losing time"
         subtitle="These are not generic software recommendations. They are signals extracted from the answers businesses gave you."
+        action={
+          <select className="ops-inline-select" value={industryFilter} onChange={(e) => setIndustryFilter(e.target.value)}>
+            {INDUSTRIES.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}
+          </select>
+        }
       />
 
       <div className="ops-opportunity-layout">
@@ -739,16 +738,16 @@ function Opportunities({
             </div>
 
             <h3>Why this is an opportunity</h3>
-            <p>{opportunityImpact(selected.name)}</p>
+            <p>{getOpportunityImpact(industryFilter, selected.name)}</p>
 
             <div className="ops-first-build">
               <div className="ops-first-build-icon"><Sparkles size={17} /></div>
-              <div><span className="ops-kicker">RECOMMENDED FIRST BUILD</span><strong>{firstBuildFor(selected.name)}</strong></div>
+              <div><span className="ops-kicker">RECOMMENDED FIRST BUILD</span><strong>{getFirstBuild(industryFilter, selected.name)}</strong></div>
             </div>
 
             <h3>Evidence from the discovery</h3>
             <div className="ops-signal-list">
-              {getOpportunitySignals(assessments, selected.name).map((signal, index) => (
+              {getOpportunitySignals(assessments.filter((a) => (a.industry || DEFAULT_INDUSTRY) === industryFilter), selected.name, industryFilter).map((signal, index) => (
                 <div className="ops-signal-card" key={`${signal.business}-${signal.question}-${index}`}>
                   <div className="ops-signal-card-head">
                     <span>{signal.business}</span>
@@ -758,18 +757,18 @@ function Opportunities({
                   <p>{signal.answer}</p>
                 </div>
               ))}
-              {!getOpportunitySignals(assessments, selected.name).length && (
+              {!getOpportunitySignals(assessments.filter((a) => (a.industry || DEFAULT_INDUSTRY) === industryFilter), selected.name, industryFilter).length && (
                 <div className="ops-no-signal">No direct answer-level evidence was matched to this opportunity yet.</div>
               )}
             </div>
 
             <h3>Recommended system components</h3>
             <div className="ops-chip-grid">
-              {recommendationsFor(selected.name).map((item) => <span key={item}><Check size={14} /> {item}</span>)}
+              {getRecommendations(industryFilter, selected.name).map((item) => <span key={item}><Check size={14} /> {item}</span>)}
             </div>
 
             <h3>Potential automation</h3>
-            <div className="ops-automation-callout"><Zap size={18} /><div><strong>{automationFor(selected.name).title}</strong><p>{automationFor(selected.name).description}</p></div></div>
+            <div className="ops-automation-callout"><Zap size={18} /><div><strong>{getAutomationFor(industryFilter, selected.name).title}</strong><p>{getAutomationFor(industryFilter, selected.name).description}</p></div></div>
           </section>
         )}
       </div>
@@ -778,29 +777,22 @@ function Opportunities({
 }
 
 function Workflows({ assessments }: { assessments: Assessment[] }) {
-  const assessment = assessments[0];
-  const answers = assessment?.answers || {};
-  const hasMaterials = answerContains(answers, ["material", "pick up", "supplier", "receipt"]);
-  const hasSchedule = answerContains(answers, ["schedule", "crew", "calendar", "appointment"]);
-  const hasCustomers = answerContains(answers, ["customer", "call", "email", "lead"]);
-
-  const stages = [
-    { name: "Lead", icon: <UserRound />, text: "Capture inquiry, customer details and project type.", signal: hasCustomers },
-    { name: "Estimate", icon: <FileText />, text: "Build scope, pricing, proposal and approval.", signal: true },
-    { name: "Contract", icon: <Check />, text: "Store signed agreement and project requirements.", signal: true },
-    { name: "Schedule", icon: <CalendarDays />, text: "Assign crew, dates, dependencies and customer expectations.", signal: hasSchedule },
-    { name: "Materials", icon: <Package />, text: "Create material list, purchase, delivery and readiness status.", signal: hasMaterials },
-    { name: "Job", icon: <Settings2 />, text: "Give the field team instructions, measurements, photos and issue tracking.", signal: true },
-    { name: "Invoice", icon: <Layers3 />, text: "Capture costs, receipts, change orders and billing status.", signal: true },
-    { name: "Closeout", icon: <ShieldCheck />, text: "Complete final walkthrough, documents and warranty follow-up.", signal: true },
-  ];
+  const [businessId, setBusinessId] = useState(assessments[0]?.id || "");
+  const assessment = assessments.find((item) => item.id === businessId) || assessments[0] || null;
+  const industry = assessment?.industry || DEFAULT_INDUSTRY;
+  const stages = getBlueprintTemplate(industry).stages;
 
   return (
     <div>
       <PageHeader
         kicker="WORKFLOW MODEL"
-        title="From first lead to project closeout"
+        title="From first contact to closeout"
         subtitle="This is the operating system the questionnaire is helping us design. Each stage should pass information to the next without re-entry."
+        action={assessments.length > 1 ? (
+          <select className="ops-inline-select" value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
+            {assessments.map((item) => <option key={item.id} value={item.id}>{item.company_name || "Unnamed business"}</option>)}
+          </select>
+        ) : undefined}
       />
 
       {!assessment ? (
@@ -808,12 +800,12 @@ function Workflows({ assessments }: { assessments: Assessment[] }) {
       ) : (
         <>
           <section className="ops-panel">
-            <div className="ops-panel-head"><div><span className="ops-kicker">CORE WORKFLOW</span><h2>{assessment.company_name || "Business"} operating model</h2></div><span className="ops-live-badge"><span /> Derived from assessment</span></div>
+            <div className="ops-panel-head"><div><span className="ops-kicker">CORE WORKFLOW · {industryLabel(industry).toUpperCase()}</span><h2>{assessment.company_name || "Business"} operating model</h2></div><span className="ops-live-badge"><span /> Derived from assessment</span></div>
             <div className="ops-flow">
               {stages.map((stage, index) => (
                 <div className="ops-flow-stage" key={stage.name}>
-                  <div className="ops-flow-node">{stage.icon}</div>
-                  <div className="ops-flow-copy"><span>0{index + 1}</span><strong>{stage.name}</strong><p>{stage.text}</p>{stage.signal && <em><Sparkles size={12} /> Assessment signal</em>}</div>
+                  <div className="ops-flow-node">{moduleIcon(stage.system)}</div>
+                  <div className="ops-flow-copy"><span>0{index + 1}</span><strong>{stage.name}</strong><p>{stage.input} → {stage.output}</p></div>
                   {index < stages.length - 1 && <ChevronRight className="ops-flow-arrow" size={19} />}
                 </div>
               ))}
@@ -849,10 +841,11 @@ function Workflows({ assessments }: { assessments: Assessment[] }) {
 }
 
 function Automation({ assessments }: { assessments: Assessment[] }) {
-  const opportunities = aggregateOpportunities(assessments);
+  const [industryFilter, setIndustryFilter] = useState(() => assessments[0]?.industry || DEFAULT_INDUSTRY);
+  const opportunities = aggregateOpportunities(assessments, industryFilter);
   const automationItems = opportunities.slice(0, 7).map((item) => ({
     ...item,
-    automation: automationFor(item.name),
+    automation: getAutomationFor(industryFilter, item.name),
   }));
 
   return (
@@ -861,6 +854,11 @@ function Automation({ assessments }: { assessments: Assessment[] }) {
         kicker="AUTOMATION & AI"
         title="What should stop being manual?"
         subtitle="Potential automations are derived from the operational friction identified in the assessments."
+        action={
+          <select className="ops-inline-select" value={industryFilter} onChange={(e) => setIndustryFilter(e.target.value)}>
+            {INDUSTRIES.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}
+          </select>
+        }
       />
 
       <div className="ops-automation-summary">
@@ -912,25 +910,18 @@ function SystemBlueprint({
     );
   }
 
+  const industry = selected.industry || DEFAULT_INDUSTRY;
   const answers = selected.answers || {};
-  const modules = getModules(answers);
+  const modules = getModules(answers, industry);
   const topModules = modules.slice(0, 6);
-  const readiness = getReadiness(answers);
-  const evidence = (name: string) => getOpportunitySignals([selected], name).slice(0, 4);
+  const readiness = getReadiness(answers, industry);
+  const evidence = (name: string) => getOpportunitySignals([selected], name, industry).slice(0, 4);
 
-  const blueprintStages = [
-    { name: "Lead intake", owner: "Sales / office", input: "Customer + project request", system: "Lead record", output: "Qualified opportunity", automation: "Create lead, assign owner, start follow-up", screens: "Lead inbox · Lead detail · Follow-up queue", fields: "Customer, contact, source, project type, notes, next action", roles: "Owner · Office · Sales", ai: "Summarize inquiry, classify project type, draft follow-up", dependency: "Customer record", priority: "High" },
-    { name: "Estimate", owner: "Estimator", input: "Scope + site information", system: "Estimate record", output: "Proposal / approval", automation: "Generate checklist and reminders", screens: "Estimate builder · Scope checklist · Proposal preview", fields: "Scope, measurements, labor, materials, allowances, price, margin", roles: "Estimator · Owner", ai: "Draft scope summary and identify missing estimate inputs", dependency: "Qualified lead", priority: "High" },
-    { name: "Contract", owner: "Office", input: "Approved proposal", system: "Project record", output: "Active job", automation: "Create project, folders and baseline", screens: "Contract status · Project setup · Document hub", fields: "Signed agreement, customer, scope, price, dates, terms", roles: "Office · Owner", ai: "Extract key obligations and missing signatures", dependency: "Approved estimate", priority: "Medium" },
-    { name: "Schedule", owner: "Scheduler", input: "Project + crew + dependencies", system: "Schedule", output: "Committed start date", automation: "Check conflicts and notify stakeholders", screens: "Calendar · Crew board · Schedule detail", fields: "Crew, dates, duration, dependencies, readiness, customer commitment", roles: "Scheduler · PM · Crew", ai: "Flag conflicts and recommend schedule adjustments", dependency: "Active project", priority: "Critical" },
-    { name: "Materials", owner: "Purchasing", input: "Scope + schedule", system: "Material board", output: "Job-ready status", automation: "Flag missing purchases before start", screens: "Material request · Purchasing board · Delivery status", fields: "Item, quantity, vendor, cost, ordered, received, needed-by date", roles: "Purchasing · PM · Crew", ai: "Group purchases, detect missing items and summarize readiness", dependency: "Estimate + schedule", priority: "Critical" },
-    { name: "Field execution", owner: "Crew / PM", input: "Job instructions", system: "Mobile job record", output: "Progress + issues", automation: "Capture photos, measurements, hours and notes", screens: "Today's jobs · Job detail · Daily update · Issue report", fields: "Instructions, photos, measurements, hours, materials used, issues", roles: "Crew · PM", ai: "Summarize daily progress and surface unresolved issues", dependency: "Scheduled job", priority: "High" },
-    { name: "Billing", owner: "Office", input: "Costs + progress", system: "Job costing / invoice", output: "Invoice + margin", automation: "Match receipts and surface billing blockers", screens: "Cost dashboard · Receipt capture · Invoice queue", fields: "Estimated cost, actual cost, labor, materials, receipts, invoice, margin", roles: "Office · Owner", ai: "Explain cost variance and flag margin risk", dependency: "Active job + cost data", priority: "High" },
-    { name: "Closeout", owner: "PM / office", input: "Completed work", system: "Closeout hub", output: "Final record + warranty", automation: "Checklist, customer update and document archive", screens: "Closeout checklist · Final documents · Warranty", fields: "Punch list, final photos, approvals, invoice status, warranty", roles: "PM · Office · Customer", ai: "Generate closeout summary and customer handoff", dependency: "Completed field work", priority: "Medium" },
-  ];
+  const template = getBlueprintTemplate(industry);
+  const blueprintStages = template.stages;
 
   const stage = blueprintStages.find((item) => item.name === selectedStage) || null;
-  const selectedSignals = stage ? getOpportunitySignals([selected], stage.name).slice(0, 5) : [];
+  const selectedSignals = stage ? getOpportunitySignals([selected], stage.name, industry).slice(0, 5) : [];
 
   return (
     <div>
@@ -940,8 +931,8 @@ function SystemBlueprint({
         subtitle="Define the screens, data, users, automations and AI functions that should exist behind each business workflow."
         action={
           <div className="ops-blueprint-actions">
-            <button className="ops-outline-btn" onClick={() => copyBlueprintSpec(selected, blueprintStages, topModules, readiness)}><Copy size={15} /> Copy build spec</button>
-            <button className="ops-outline-btn" onClick={() => downloadBlueprintSpec(selected, blueprintStages, topModules, readiness)}><Download size={15} /> Download spec</button>
+            <button className="ops-outline-btn" onClick={() => copyBlueprintSpec(selected, template, topModules, readiness)}><Copy size={15} /> Copy build spec</button>
+            <button className="ops-outline-btn" onClick={() => downloadBlueprintSpec(selected, template, topModules, readiness)}><Download size={15} /> Download spec</button>
             <div className="ops-blueprint-select">
               <label>Business<select value={selected.id} onChange={(e) => { setBusinessId(e.target.value); setSelectedStage(null); }}>{assessments.map((item) => <option key={item.id} value={item.id}>{item.company_name || "Unnamed business"}</option>)}</select></label>
             </div>
@@ -951,7 +942,7 @@ function SystemBlueprint({
 
       <section className="ops-blueprint-hero">
         <div>
-          <span className="ops-kicker">BUILD TARGET</span>
+          <span className="ops-kicker">BUILD TARGET · {industryLabel(industry).toUpperCase()}</span>
           <h2>{selected.company_name || "Unnamed business"}</h2>
           <p>Design the system around the business's actual friction instead of forcing the business into a generic software package.</p>
         </div>
@@ -1026,15 +1017,7 @@ function SystemBlueprint({
         <section className="ops-panel">
           <div className="ops-panel-head"><div><span className="ops-kicker">5 · DATA MODEL</span><h2>Core records to build</h2></div></div>
           <div className="ops-data-model">
-            {[
-              ["Customer", "Contact details, property, communication history"],
-              ["Lead", "Source, stage, follow-up, estimate status"],
-              ["Project", "Scope, contract, schedule, status, owner"],
-              ["Job", "Crew, site instructions, photos, measurements, hours"],
-              ["Material", "Item, vendor, quantity, cost, purchase and delivery status"],
-              ["Financial", "Estimate, actual cost, receipts, invoice, margin"],
-              ["Document", "Type, project, date, owner, storage location"],
-            ].map(([name, detail]) => <div key={name}><span className="ops-opportunity-icon">{name === "Material" ? <Package size={16} /> : name === "Document" ? <FileText size={16} /> : <Layers3 size={16} />}</span><span><strong>{name}</strong><small>{detail}</small></span></div>)}
+            {template.dataModel.map(([name, detail]) => <div key={name}><span className="ops-opportunity-icon">{moduleIcon(name)}</span><span><strong>{name}</strong><small>{detail}</small></span></div>)}
           </div>
         </section>
 
@@ -1052,15 +1035,9 @@ function SystemBlueprint({
       <section className="ops-panel ops-build-roadmap">
         <div className="ops-panel-head"><div><span className="ops-kicker">7 · IMPLEMENTATION ROADMAP</span><h2>Build in the right order</h2></div></div>
         <div className="ops-roadmap-large">
-          {[
-            ["01", "Foundation", "Customers, leads, projects, users and document structure"],
-            ["02", "Operational control", "Scheduling, materials, field updates and job status"],
-            ["03", "Financial control", "Estimates, receipts, job costs, invoices and margin"],
-            ["04", "Automation", "Reminders, alerts, customer updates and routine data movement"],
-            ["05", "AI layer", "Summaries, exception detection, forecasting and decision support"],
-          ].map(([number, title, detail]) => <div key={number}><span>{number}</span><div><strong>{title}</strong><p>{detail}</p></div></div>)}
+          {template.roadmap.map(([number, title, detail]) => <div key={number}><span>{number}</span><div><strong>{title}</strong><p>{detail}</p></div></div>)}
         </div>
-        <div className="ops-blueprint-footer"><span><Sparkles size={15} /> Recommended starting point: <strong>{firstBuildFor(topModules[0]?.name || "")}</strong></span><button className="ops-outline-btn" onClick={() => onOpenBusiness(selected.id)}>Review business evidence <ChevronRight size={15} /></button></div>
+        <div className="ops-blueprint-footer"><span><Sparkles size={15} /> Recommended starting point: <strong>{getFirstBuild(industry, topModules[0]?.name || "")}</strong></span><button className="ops-outline-btn" onClick={() => onOpenBusiness(selected.id)}>Review business evidence <ChevronRight size={15} /></button></div>
       </section>
     </div>
   );
@@ -1079,8 +1056,9 @@ function Reports({ assessments, initialReportId }: { assessments: Assessment[]; 
     );
   }
 
-  const modules = getModules(selected.answers || {});
-  const readiness = getReadiness(selected.answers || {});
+  const industry = selected.industry || DEFAULT_INDUSTRY;
+  const modules = getModules(selected.answers || {}, industry);
+  const readiness = getReadiness(selected.answers || {}, industry);
   const answers = Object.entries(selected.answers || {});
 
   return (
@@ -1106,7 +1084,7 @@ function Reports({ assessments, initialReportId }: { assessments: Assessment[]; 
 
       <article className="ops-report">
         <div className="ops-report-cover">
-          <div><span className="ops-kicker">RENOVATION DISCOVERY · OPERATIONS REPORT</span><h2>{selected.company_name || "Unnamed business"}</h2><p>{selected.contact_name || "No contact name"} · {selected.email || "No email"}</p><span className="ops-report-status">{selected.status === "reviewed" ? "Reviewed" : "New assessment"}</span></div>
+          <div><span className="ops-kicker">{industryLabel(industry).toUpperCase()} · OPERATIONS REPORT</span><h2>{selected.company_name || "Unnamed business"}</h2><p>{selected.contact_name || "No contact name"} · {selected.email || "No email"}</p><span className="ops-report-status">{selected.status === "reviewed" ? "Reviewed" : "New assessment"}</span></div>
           <div className="ops-report-score"><span>System readiness</span><strong>{readiness}<small>/100</small></strong></div>
         </div>
 
@@ -1132,7 +1110,7 @@ function Reports({ assessments, initialReportId }: { assessments: Assessment[]; 
           <h3>What the business told us</h3>
           <div className="ops-report-answers">
             {answers.map(([id, value]) => {
-              const meta = getQuestionText(id);
+              const meta = getQuestionText(id, industry);
               const display = formatAnswer(id, value, selected.answers || {});
               return (
                 <div key={id}>
@@ -1166,8 +1144,9 @@ function BusinessDetail({
   onOpenBlueprint: () => void;
   onOpenReport: () => void;
 }) {
-  const modules = getModules(assessment.answers || {});
-  const readiness = getReadiness(assessment.answers || {});
+  const industry = assessment.industry || DEFAULT_INDUSTRY;
+  const modules = getModules(assessment.answers || {}, industry);
+  const readiness = getReadiness(assessment.answers || {}, industry);
   const answerCount = Object.values(assessment.answers || {}).filter((value) =>
     Array.isArray(value) ? value.length > 0 : String(value ?? "").trim()
   ).length;
@@ -1178,7 +1157,7 @@ function BusinessDetail({
 
       <div className="ops-business-hero">
         <div>
-          <span className="ops-kicker">BUSINESS PROFILE</span>
+          <span className="ops-kicker">BUSINESS PROFILE · {industryLabel(industry).toUpperCase()}</span>
           <h1>{assessment.company_name || "Unnamed business"}</h1>
           <div className="ops-contact-line">
             <span><UserRound size={14} /> {assessment.contact_name || "No contact name"}</span>
@@ -1254,8 +1233,8 @@ function BusinessDetail({
               <span className="ops-opportunity-icon">{moduleIcon(module.name)}</span>
               <div>
                 <strong>{module.name}</strong>
-                <p>{opportunityImpact(module.name)}</p>
-                <em>{firstBuildFor(module.name)}</em>
+                <p>{getOpportunityImpact(industry, module.name)}</p>
+                <em>{getFirstBuild(industry, module.name)}</em>
               </div>
             </div>
           ))}
@@ -1266,7 +1245,7 @@ function BusinessDetail({
         <div className="ops-panel-head"><div><span className="ops-kicker">DISCOVERY RESPONSES</span><h2>What the business told us</h2></div></div>
         <div className="ops-answer-grid">
           {Object.entries(assessment.answers || {}).map(([id, value]) => {
-            const meta = getQuestionText(id);
+            const meta = getQuestionText(id, industry);
             const display = formatAnswer(id, value, assessment.answers || {});
             return (
               <div className="ops-answer-card" key={id}>
@@ -1333,9 +1312,10 @@ function formatAnswer(id: string, value: string[] | string, answers: Answers) {
   return base.filter(Boolean).join(" · ");
 }
 
-function buildBlueprintSpec(selected: Assessment, stages: BlueprintStage[], modules: ReturnType<typeof getModules>, readiness: number) {
+function buildBlueprintSpec(selected: Assessment, template: ReturnType<typeof getBlueprintTemplate>, modules: ReturnType<typeof getModules>, readiness: number) {
+  const industry = selected.industry || DEFAULT_INDUSTRY;
   const lines: string[] = [
-    "RENOVATION DISCOVERY — SOFTWARE BUILD SPECIFICATION",
+    getSpecTitle(industry),
     "",
     `Business: ${selected.company_name || "Unnamed business"}`,
     `Contact: ${selected.contact_name || "—"}`,
@@ -1347,7 +1327,7 @@ function buildBlueprintSpec(selected: Assessment, stages: BlueprintStage[], modu
     "",
     "WORKFLOW MODULES",
   ];
-  stages.forEach((stage, i) => {
+  template.stages.forEach((stage, i) => {
     lines.push(
       `${i + 1}. ${stage.name}`,
       `   Owner: ${stage.owner}`,
@@ -1361,33 +1341,15 @@ function buildBlueprintSpec(selected: Assessment, stages: BlueprintStage[], modu
       ""
     );
   });
-  lines.push(
-    "CORE DATA MODEL",
-    "Customer — contact details, property, communication history",
-    "Lead — source, stage, follow-up, estimate status",
-    "Project — scope, contract, schedule, status, owner",
-    "Job — crew, site instructions, photos, measurements, hours",
-    "Material — item, vendor, quantity, cost, purchase and delivery status",
-    "Financial — estimate, actual cost, receipts, invoice, margin",
-    "Document — type, project, date, owner, storage location",
-    "",
-    "IMPLEMENTATION ORDER",
-    "01 Foundation — customers, leads, projects, users and document structure",
-    "02 Operational control — scheduling, materials, field updates and job status",
-    "03 Financial control — estimates, receipts, job costs, invoices and margin",
-    "04 Automation — reminders, alerts, customer updates and routine data movement",
-    "05 AI layer — summaries, exception detection, forecasting and decision support",
-  );
+  lines.push("CORE DATA MODEL");
+  template.dataModel.forEach(([name, detail]) => lines.push(`${name} — ${detail}`));
+  lines.push("", "IMPLEMENTATION ORDER");
+  template.roadmap.forEach(([number, title, detail]) => lines.push(`${number} ${title} — ${detail}`));
   return lines.join("\n");
 }
 
-type BlueprintStage = {
-  name: string; owner: string; input: string; system: string; output: string; automation: string;
-  screens: string; fields: string; roles: string; ai: string; dependency: string; priority: string;
-};
-
-async function copyBlueprintSpec(selected: Assessment, stages: BlueprintStage[], modules: ReturnType<typeof getModules>, readiness: number) {
-  const text = buildBlueprintSpec(selected, stages, modules, readiness);
+async function copyBlueprintSpec(selected: Assessment, template: ReturnType<typeof getBlueprintTemplate>, modules: ReturnType<typeof getModules>, readiness: number) {
+  const text = buildBlueprintSpec(selected, template, modules, readiness);
   try {
     await navigator.clipboard.writeText(text);
     window.alert("Build specification copied to your clipboard.");
@@ -1396,8 +1358,8 @@ async function copyBlueprintSpec(selected: Assessment, stages: BlueprintStage[],
   }
 }
 
-function downloadBlueprintSpec(selected: Assessment, stages: BlueprintStage[], modules: ReturnType<typeof getModules>, readiness: number) {
-  const text = buildBlueprintSpec(selected, stages, modules, readiness);
+function downloadBlueprintSpec(selected: Assessment, template: ReturnType<typeof getBlueprintTemplate>, modules: ReturnType<typeof getModules>, readiness: number) {
+  const text = buildBlueprintSpec(selected, template, modules, readiness);
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1411,18 +1373,18 @@ function downloadBlueprintSpec(selected: Assessment, stages: BlueprintStage[], m
 
 function moduleIcon(name: string) {
   const n = name.toLowerCase();
-  if (n.includes("material")) return <Package size={18} />;
-  if (n.includes("schedule")) return <CalendarDays size={18} />;
-  if (n.includes("lead")) return <UserRound size={18} />;
+  if (n.includes("material") || n.includes("inventory") || n.includes("merchandise") || n.includes("product")) return <Package size={18} />;
+  if (n.includes("schedul") || n.includes("staff") || n.includes("shift")) return <CalendarDays size={18} />;
+  if (n.includes("lead") || n.includes("reservation") || n.includes("order") || n.includes("guest")) return <UserRound size={18} />;
   if (n.includes("project")) return <Layers3 size={18} />;
-  if (n.includes("cost")) return <BarChart3 size={18} />;
-  if (n.includes("field")) return <Settings2 size={18} />;
-  if (n.includes("customer")) return <Mail size={18} />;
+  if (n.includes("cost") || n.includes("money") || n.includes("margin") || n.includes("financial")) return <BarChart3 size={18} />;
+  if (n.includes("field") || n.includes("kitchen") || n.includes("floor")) return <Settings2 size={18} />;
+  if (n.includes("customer") || n.includes("vendor")) return <Mail size={18} />;
   if (n.includes("document")) return <FileText size={18} />;
   return <Zap size={18} />;
 }
 
-function aggregateOpportunities(assessments: Assessment[]) {
+function aggregateOpportunities(assessments: Assessment[], industry: string = DEFAULT_INDUSTRY) {
   const map = new Map<string, {
     name: string;
     description: string;
@@ -1432,8 +1394,10 @@ function aggregateOpportunities(assessments: Assessment[]) {
     priority: string;
   }>();
 
-  assessments.forEach((assessment) => {
-    getModules(assessment.answers || {}).forEach((module) => {
+  assessments
+    .filter((assessment) => (assessment.industry || DEFAULT_INDUSTRY) === industry)
+    .forEach((assessment) => {
+    getModules(assessment.answers || {}, industry).forEach((module) => {
       const existing = map.get(module.name);
       if (!existing) {
         map.set(module.name, {
@@ -1454,41 +1418,6 @@ function aggregateOpportunities(assessments: Assessment[]) {
   });
 
   return [...map.values()].sort((a, b) => b.score - a.score);
-}
-
-function recommendationsFor(name: string) {
-  const n = name.toLowerCase();
-  if (n.includes("material")) return ["Material request board", "Vendor database", "Purchase orders", "Delivery status", "Receipt capture", "Job allocation"];
-  if (n.includes("schedule")) return ["Crew calendar", "Job dependencies", "Material readiness", "Customer scheduling", "Change alerts", "Dispatch view"];
-  if (n.includes("lead")) return ["Lead inbox", "Pipeline stages", "Follow-up reminders", "Estimate tracking", "Proposal status", "Source tracking"];
-  if (n.includes("project")) return ["Project dashboard", "Milestones", "Change orders", "Task ownership", "Closeout checklist", "Warranty records"];
-  if (n.includes("cost")) return ["Estimate baseline", "Labor tracking", "Material costs", "Subcontractor costs", "Actual vs. estimated", "Margin view"];
-  if (n.includes("field")) return ["Mobile job view", "Daily reports", "Photos", "Measurements", "Issue tracking", "Hours"];
-  if (n.includes("customer")) return ["Customer portal", "Status updates", "Approvals", "Scheduling messages", "Communication history", "Closeout updates"];
-  if (n.includes("document")) return ["Project document hub", "Contracts", "Permits", "Receipts", "Photos", "Warranty files"];
-  return ["Centralized data", "Task automation", "Notifications", "AI summaries", "Exception alerts", "Reporting"];
-}
-
-function automationFor(name: string) {
-  const n = name.toLowerCase();
-  if (n.includes("material")) return { title: "Automatically check material readiness", description: "When a job is scheduled, compare the required material list with purchase and delivery status, then alert the responsible person about missing items." };
-  if (n.includes("schedule")) return { title: "Detect schedule conflicts", description: "When a job date or crew changes, check assignments, dependencies and customer commitments and surface conflicts before they become problems." };
-  if (n.includes("lead")) return { title: "Never let a lead go cold", description: "Create follow-up tasks and reminders automatically based on lead stage, estimate status and the last customer interaction." };
-  if (n.includes("project")) return { title: "Create projects from approved work", description: "Once a proposal is accepted, automatically create the project, milestones, documents, tasks and initial schedule information." };
-  if (n.includes("cost")) return { title: "Connect costs to the job", description: "Capture receipts, labor and subcontractor costs against the correct project and compare actuals with the original estimate." };
-  if (n.includes("field")) return { title: "Turn field updates into records", description: "Use mobile updates, photos, hours and issues to automatically keep the project record current." };
-  if (n.includes("customer")) return { title: "Send proactive customer updates", description: "Trigger customer notifications when scheduling, materials, milestones or approvals change so fewer status calls are needed." };
-  if (n.includes("document")) return { title: "Organize project documents automatically", description: "Route contracts, photos, receipts, permits and closeout documents into the correct project and category." };
-  return { title: "Automate repetitive administration", description: "Identify repeated data entry and handoffs, then automate reminders, summaries and routine record updates." };
-}
-
-function answerContains(answers: Answers, terms: string[]) {
-  const text = Object.values(answers || {})
-    .flatMap((value) => Array.isArray(value) ? value : [value])
-    .join(" ")
-    .toLowerCase();
-
-  return terms.some((term) => text.includes(term.toLowerCase()));
 }
 
 function OperationsStyles() {
@@ -1574,21 +1503,24 @@ function OperationsStyles() {
       .ops-next-banner>div:nth-child(2) { flex:1; }
       .ops-next-banner h2 { font-size:15px;margin:5px 0; }
       .ops-next-banner p { color:#82959e;font-size:11px;line-height:1.55;margin:0;max-width:780px; }
-      .ops-toolbar { margin-bottom:13px; }
+      .ops-toolbar { margin-bottom:13px;display:flex;align-items:center;gap:10px; }
       .ops-search { width:min(470px,100%);height:40px;border:1px solid var(--ops-line);background:rgba(255,255,255,.025);border-radius:9px;display:flex;align-items:center;padding:0 11px;color:#667982;gap:8px; }
       .ops-search input { flex:1;background:transparent;border:0;outline:0;color:#e7eef0;font-size:11px; }
       .ops-search span { font-size:10px;color:#60737b; }
-      .ops-directory-head,.ops-directory-row { display:grid;grid-template-columns:2fr 1.2fr .8fr 1.4fr 1fr 25px;align-items:center;gap:12px; }
+      .ops-directory-head,.ops-directory-row { display:grid;grid-template-columns:2fr .9fr 1.1fr .8fr 1.4fr 1fr 25px;align-items:center;gap:12px; }
       .ops-directory-head { padding:11px 18px;color:#52666f;font-size:9px;letter-spacing:.08em;text-transform:uppercase;border-bottom:1px solid var(--ops-line); }
       .ops-directory-row { width:100%;border:0;border-bottom:1px solid var(--ops-line);background:transparent;color:#bcc9cd;text-align:left;padding:14px 18px;font-size:11px; }
       .ops-directory-row:last-child { border-bottom:0; }
       .ops-business-cell { display:flex;align-items:center;gap:10px;min-width:0; }
       .ops-business-cell>span:last-child { min-width:0; }
-      .ops-business-cell strong,.ops-business-cell small,.ops-directory-row>span:nth-child(4) strong,.ops-directory-row>span:nth-child(4) small { display:block; }
+      .ops-business-cell strong,.ops-business-cell small,.ops-directory-row>span:nth-child(5) strong,.ops-directory-row>span:nth-child(5) small { display:block; }
       .ops-business-cell strong { color:#e7eef0;font-size:12px; }
-      .ops-business-cell small,.ops-directory-row>span:nth-child(4) small { color:#6d8089;font-size:9px;margin-top:3px; }
+      .ops-business-cell small,.ops-directory-row>span:nth-child(5) small { color:#6d8089;font-size:9px;margin-top:3px; }
       .ops-score-pill { color:var(--ops-accent);font-size:15px; }
-      .ops-directory-row>span:nth-child(3)>small { color:#5f727a;font-size:9px; }
+      .ops-directory-row>span:nth-child(4)>small { color:#5f727a;font-size:9px; }
+      .ops-industry-badge { display:inline-block;padding:3px 9px;border-radius:999px;background:rgba(125,184,255,.12);color:var(--ops-accent-2);font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase; }
+      .ops-inline-select { background:rgba(255,255,255,.04);border:1px solid var(--ops-line);color:#cdd8dc;border-radius:9px;padding:9px 11px;font-size:11px; }
+      .ops-panel-head-actions { display:flex;align-items:center;gap:10px; }
       .ops-opportunity-layout { display:grid;grid-template-columns:.82fr 1.18fr;gap:16px; }
       .ops-large-op { width:100%;border:0;border-bottom:1px solid var(--ops-line);background:transparent;color:inherit;display:flex;align-items:center;gap:11px;text-align:left;padding:14px 18px; }
       .ops-large-op.active { background:rgba(111,224,194,.055);box-shadow:inset 2px 0 var(--ops-accent); }
@@ -1809,7 +1741,7 @@ function OperationsStyles() {
       .ops-login-card .ops-primary-btn { width:100%;padding:12px;margin-top:3px; }
       .ops-forgot { width:100%;border:0;background:transparent;color:#70858e;font-size:10px;margin-top:14px; }
       .ops-login-note { border-top:1px solid var(--ops-line);margin-top:20px;padding-top:15px;color:#536871;font-size:9px;display:flex;gap:6px;line-height:1.5; }
-      @media(max-width:1050px) { .ops-stat-grid{grid-template-columns:1fr 1fr}.ops-grid-two,.ops-detail-grid,.ops-opportunity-layout{grid-template-columns:1fr}.ops-sidebar{width:210px}.ops-main{width:calc(100% - 210px);margin-left:210px}.ops-flow{grid-template-columns:repeat(4,1fr);gap:20px}.ops-flow-arrow{display:none}.ops-directory-head,.ops-directory-row{grid-template-columns:2fr 1fr .8fr 1.2fr 1fr 20px}.ops-content{padding:28px 22px 50px} }
+      @media(max-width:1050px) { .ops-stat-grid{grid-template-columns:1fr 1fr}.ops-grid-two,.ops-detail-grid,.ops-opportunity-layout{grid-template-columns:1fr}.ops-sidebar{width:210px}.ops-main{width:calc(100% - 210px);margin-left:210px}.ops-flow{grid-template-columns:repeat(4,1fr);gap:20px}.ops-flow-arrow{display:none}.ops-directory-head,.ops-directory-row{grid-template-columns:2fr .8fr 1fr .8fr 1.2fr 1fr 20px}.ops-content{padding:28px 22px 50px} }
       @media(max-width:760px) { .ops-blueprint-actions{width:100%;justify-content:flex-start}.ops-blueprint-actions .ops-blueprint-select{width:100%}.ops-blueprint-stage-strip{grid-template-columns:1fr 1fr}.ops-module-design-grid{grid-template-columns:1fr 1fr}.ops-design-flow{grid-template-columns:1fr}.ops-design-flow>svg{display:none}.ops-stage-bottom-grid{grid-template-columns:1fr}.ops-stage-designer-head{align-items:flex-start;flex-direction:column}.ops-blueprint-grid{grid-template-columns:1fr}.ops-blueprint-hero{align-items:flex-start;flex-direction:column}.ops-blueprint-readiness{text-align:left}.ops-roadmap-large{grid-template-columns:1fr 1fr}.ops-data-model{grid-template-columns:1fr}.ops-blueprint-footer{align-items:flex-start;flex-direction:column}.ops-blueprint-select select{min-width:180px}.ops-findings-grid{grid-template-columns:1fr}.ops-sidebar{position:relative;width:100%;min-height:auto;border-right:0;border-bottom:1px solid var(--ops-line)}.ops-app{display:block}.ops-main{width:100%;margin-left:0}.ops-sidebar-bottom{display:none}.ops-nav{grid-template-columns:repeat(3,1fr)}.ops-nav-item{justify-content:center}.ops-nav-item span{display:none}.ops-workspace{display:none}.ops-brand{height:62px}.ops-topbar{padding:0 15px}.ops-content{padding:22px 14px 45px}.ops-page-header{align-items:flex-start;flex-direction:column}.ops-page-header h1{font-size:24px}.ops-stat-grid{grid-template-columns:1fr 1fr}.ops-stat{min-height:105px;padding:13px}.ops-stat strong{font-size:19px}.ops-directory{overflow:auto}.ops-directory-head{display:none}.ops-directory-row{display:grid;grid-template-columns:1fr auto;gap:8px}.ops-directory-row>span:not(:first-child):not(:last-child){display:none}.ops-answer-grid,.ops-report-answers,.ops-report-modules{grid-template-columns:1fr}.ops-next-banner{align-items:flex-start;flex-direction:column}.ops-detail-actions{flex-wrap:wrap}.ops-business-hero{align-items:flex-start;flex-direction:column}.ops-hero-score{text-align:left;border-left:0;padding-left:0}.ops-flow{grid-template-columns:1fr 1fr}.ops-automation-summary{grid-template-columns:1fr}.ops-report-cover{flex-direction:column}.ops-report-score{text-align:left}.ops-login-card{padding:25px}.ops-opportunity-detail{padding:18px} }
       .ops-blueprint-stage-strip { display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:14px 18px;border-bottom:1px solid var(--ops-line); }
       .ops-blueprint-stage-strip button { border:1px solid var(--ops-line);background:rgba(255,255,255,.015);color:#71858d;border-radius:8px;padding:10px;text-align:left;display:grid;grid-template-columns:24px 1fr 14px;align-items:center;gap:7px;cursor:pointer; }

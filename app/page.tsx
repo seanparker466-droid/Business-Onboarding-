@@ -6,24 +6,27 @@ import {
   Clock3, Compass, Database, Hammer, Layers3, Mail, MapPin, Sparkles,
   TrendingUp, UserRound, X, Zap
 } from "lucide-react";
-import { sections } from "../lib/questions";
+import { getSectionsForIndustry } from "../lib/questions";
+import { INDUSTRIES, DEFAULT_INDUSTRY } from "../lib/industries";
+import { getModules } from "../lib/assessment-analysis";
 import { createClient } from "../lib/supabase-browser";
 
 type Answers = Record<string, string[] | string>;
-const KEY = "renovationDiscovery_v5_first_client";
+const KEY = "businessDiscovery_v6_multi_industry";
 
 const icons = [Compass, Hammer, TrendingUp, ClipboardCheck, Layers3, MapPin, Database, UserRound, BarChart3, Clock3, Mail, Zap, Sparkles, Database, TrendingUp];
 
 export default function Home() {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState<Answers>({});
-  const [contact, setContact] = useState({ name: "", email: "", company: "" });
+  const [contact, setContact] = useState({ name: "", email: "", company: "", industry: DEFAULT_INDUSTRY as string });
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const submitLock = useRef(false);
 
+  const sections = useMemo(() => getSectionsForIndustry(contact.industry), [contact.industry]);
   const sec = sections[step];
   const answeredCount = Object.values(answers).filter(v => Array.isArray(v) ? v.length > 0 : String(v).trim().length > 0).length;
   const totalQuestions = sections.reduce((n, s) => n + s.qs.length, 0);
@@ -39,7 +42,7 @@ export default function Home() {
       const x = JSON.parse(localStorage.getItem(KEY) || "null");
       if (x) {
         setAnswers(x.answers || {});
-        setContact(x.contact || { name: "", email: "", company: "" });
+        setContact(x.contact || { name: "", email: "", company: "", industry: DEFAULT_INDUSTRY });
         setStep(Math.min(Number(x.step) || 0, sections.length - 1));
       }
     } catch {}
@@ -55,7 +58,7 @@ export default function Home() {
     localStorage.removeItem(KEY);
     sessionStorage.removeItem(`${KEY}:submitted`);
     setAnswers({});
-    setContact({ name: "", email: "", company: "" });
+    setContact({ name: "", email: "", company: "", industry: DEFAULT_INDUSTRY });
     setStep(0);
     setSubmitError("");
   }
@@ -101,6 +104,7 @@ export default function Home() {
         contact_name: contact.name || null,
         company_name: contact.company || null,
         email: contact.email || null,
+        industry: contact.industry || DEFAULT_INDUSTRY,
         answers
       });
       if (error) {
@@ -204,7 +208,7 @@ export default function Home() {
       <div className="app-shell">
       <header className="app-header">
         <div className="header-inner">
-          <div className="wordmark"><span className="wordmark-mark"><Layers3 size={17}/></span> RENOVATION DISCOVERY</div>
+          <div className="wordmark"><span className="wordmark-mark"><Layers3 size={17}/></span> BUSINESS DISCOVERY</div>
           <div className="header-actions">
             <div className="save-status"><span className="live-dot"/> {savedAt ? "Progress saved" : "Ready to save"}</div>
             <button type="button" className="start-over-btn" onClick={startOver} disabled={saving}>Start over</button>
@@ -260,6 +264,11 @@ export default function Home() {
                 <label><span>Your name</span><input value={contact.name} placeholder="Jane Smith" onChange={e => setContact({...contact, name: e.target.value})}/></label>
                 <label><span>Company name</span><input value={contact.company} placeholder="Smith Renovation Co." onChange={e => setContact({...contact, company: e.target.value})}/></label>
                 <label><span>Email</span><input type="email" value={contact.email} placeholder="you@company.com" onChange={e => setContact({...contact, email: e.target.value})}/></label>
+                <label><span>Type of business</span>
+                  <select className="field" value={contact.industry} onChange={e => { setContact({...contact, industry: e.target.value}); setAnswers({}); }}>
+                    {INDUSTRIES.map(i => <option key={i.id} value={i.id}>{i.label}</option>)}
+                  </select>
+                </label>
               </div>
             </div>
           )}
@@ -325,24 +334,8 @@ export default function Home() {
   );
 }
 
-function Result({ answers, contact }: { answers: Answers, contact: {name:string,email:string,company:string} }) {
-  const modules = useMemo(() => {
-    const flat = Object.values(answers).flatMap(v => Array.isArray(v) ? v : [v]).join(" | ").toLowerCase();
-    const rules: ReadonlyArray<readonly [string, string, string[]]> = [
-      ["Scheduling & Dispatch", "Centralize crew assignments, job timing, material readiness, weather and changes.", ["scheduling","schedule","crew availability","weather"]],
-      ["Lead & Sales CRM", "Capture leads, automate follow-up and keep estimates and proposals in one pipeline.", ["lead","estimate","follow-up","proposal"]],
-      ["Project Management", "Create one source of truth from signed contract through completion and warranty.", ["project","progress","job status"]],
-      ["Materials & Purchasing", "Connect material lists, purchasing, delivery status, receipts and job allocation.", ["material","purchasing","receipts"]],
-      ["Job Costing", "Compare estimated and actual labor, materials and subcontractor costs.", ["job profit","job costing","labor cost","material cost"]],
-      ["Field Operations", "Give crews mobile access to job instructions, photos, hours, issues and daily reports.", ["job-site","photos","hours","field"]],
-      ["Customer Experience", "Create a clear customer communication trail for updates, approvals and scheduling.", ["customer","messages","status calls"]],
-      ["Document Hub", "Keep contracts, permits, photos, receipts, change orders and warranty records organized.", ["documents","document","paper","folders"]],
-      ["Automation & AI", "Reduce repeated entry, reminders, follow-ups and administrative reporting.", ["re-entering","data entry","reminders","repeating information"]]
-    ];
-    return rules.map(([name, desc, keys]) => ({
-      name, desc, score: keys.filter(k => flat.includes(k)).length
-    })).sort((a,b) => b.score - a.score);
-  }, [answers]);
+function Result({ answers, contact }: { answers: Answers, contact: {name:string,email:string,company:string,industry:string} }) {
+  const modules = useMemo(() => getModules(answers, contact.industry).map(m => ({ name: m.name, desc: m.description, score: m.score })), [answers, contact.industry]);
 
   const maxScore = Math.max(1, modules[0]?.score || 1);
   const totalSignals = modules.reduce((n,m) => n + m.score, 0);
@@ -358,7 +351,7 @@ function Result({ answers, contact }: { answers: Answers, contact: {name:string,
       <div className="app-shell result-shell">
       <header className="app-header">
         <div className="header-inner">
-          <div className="wordmark"><span className="wordmark-mark"><Layers3 size={17}/></span> RENOVATION DISCOVERY</div>
+          <div className="wordmark"><span className="wordmark-mark"><Layers3 size={17}/></span> BUSINESS DISCOVERY</div>
           <div className="save-status"><Check size={14}/> Assessment submitted</div>
         </div>
       </header>

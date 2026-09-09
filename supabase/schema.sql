@@ -10,13 +10,15 @@ create table if not exists public.assessments (
   answers jsonb not null default '{}'::jsonb,
   status text not null default 'submitted' check (status in ('submitted','reviewed')),
   reviewed_at timestamptz,
-  admin_notes text
+  admin_notes text,
+  industry text not null default 'renovation'
 );
 
 alter table public.assessments add column if not exists updated_at timestamptz not null default now();
 alter table public.assessments add column if not exists status text not null default 'submitted';
 alter table public.assessments add column if not exists reviewed_at timestamptz;
 alter table public.assessments add column if not exists admin_notes text;
+alter table public.assessments add column if not exists industry text not null default 'renovation';
 
 alter table public.assessments enable row level security;
 
